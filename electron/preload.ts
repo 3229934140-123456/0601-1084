@@ -36,7 +36,8 @@ const api = {
     createBatch: (items: any[]) => ipcRenderer.invoke('inventoryCheck:createBatch', items),
     handleDiff: (id: number, handleType: 'adjust' | 'ignore', remark?: string) =>
       ipcRenderer.invoke('inventoryCheck:handleDiff', id, handleType, remark),
-    getByNo: (checkNo: string) => ipcRenderer.invoke('inventoryCheck:getByNo', checkNo)
+    getByNo: (checkNo: string) => ipcRenderer.invoke('inventoryCheck:getByNo', checkNo),
+    groupList: (params?: any) => ipcRenderer.invoke('inventoryCheck:groupList', params)
   },
   transaction: {
     list: (params: any) => ipcRenderer.invoke('transaction:list', params),

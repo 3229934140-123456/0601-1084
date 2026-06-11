@@ -91,39 +91,58 @@ export function createTransfer(record: Omit<TransferRecord, 'id' | 'transfer_no'
       throw new Error('库存不足')
     }
 
-    if (asset.warehouse_id === record.from_warehouse_id) {
+    if (asset.serial_number && record.quantity === 1) {
       updateAsset(record.asset_id!, {
-        quantity: (asset.quantity || 0) - record.quantity
-      })
-    }
-
-    let targetAsset = queryOne(
-      'SELECT * FROM assets WHERE name = ? AND model = ? AND warehouse_id = ? AND (serial_number = ? OR serial_number IS NULL)',
-      [record.asset_name, record.model, record.to_warehouse_id, record.serial_number || '']
-    )
-
-    if (targetAsset) {
-      updateAsset(targetAsset.id, {
-        quantity: (targetAsset.quantity || 0) + record.quantity,
-        shelf: record.to_shelf || targetAsset.shelf
+        warehouse_id: record.to_warehouse_id,
+        shelf: record.to_shelf || asset.shelf
       })
     } else {
-      const insertSql = `
-        INSERT INTO assets (name, model, serial_number, category, warehouse_id, shelf, quantity, unit_price, supplier, safety_stock, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '正常')
-      `
-      const result = run(insertSql, [
-        record.asset_name,
-        record.model,
-        record.serial_number || null,
-        record.category || asset.category,
-        record.to_warehouse_id,
-        record.to_shelf,
-        record.quantity,
-        asset.unit_price,
-        asset.supplier
-      ])
-      targetAsset = { id: result.lastInsertRowid }
+      if (asset.warehouse_id === record.from_warehouse_id) {
+        const newQty = (asset.quantity || 0) - record.quantity
+        if (newQty <= 0) {
+          run('DELETE FROM assets WHERE id = ?', [record.asset_id!])
+        } else {
+          updateAsset(record.asset_id!, {
+            quantity: newQty
+          })
+        }
+      }
+
+      let targetAsset: any = null
+      if (record.serial_number) {
+        targetAsset = queryOne(
+          'SELECT * FROM assets WHERE serial_number = ? AND warehouse_id = ?',
+          [record.serial_number, record.to_warehouse_id]
+        )
+      } else {
+        targetAsset = queryOne(
+          'SELECT * FROM assets WHERE name = ? AND model = ? AND warehouse_id = ? AND (serial_number IS NULL OR serial_number = \'\')',
+          [record.asset_name, record.model || '', record.to_warehouse_id]
+        )
+      }
+
+      if (targetAsset) {
+        updateAsset(targetAsset.id, {
+          quantity: (targetAsset.quantity || 0) + record.quantity,
+          shelf: record.to_shelf || targetAsset.shelf
+        })
+      } else {
+        const insertSql = `
+          INSERT INTO assets (name, model, serial_number, category, warehouse_id, shelf, quantity, unit_price, supplier, safety_stock, status)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '正常')
+        `
+        run(insertSql, [
+          record.asset_name,
+          record.model || null,
+          record.serial_number || null,
+          record.category || asset.category,
+          record.to_warehouse_id,
+          record.to_shelf || null,
+          record.quantity,
+          asset.unit_price,
+          asset.supplier
+        ])
+      }
     }
 
     const sql = `

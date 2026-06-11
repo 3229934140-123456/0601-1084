@@ -113,6 +113,10 @@ export function registerIpcHandlers() {
     return inventoryCheckService.getInventoryCheckList(params)
   })
 
+  ipcMain.handle('inventoryCheck:groupList', async (_, params) => {
+    return inventoryCheckService.getCheckGroupList(params)
+  })
+
   ipcMain.handle('inventoryCheck:createBatch', async (_, items) => {
     return inventoryCheckService.createBatchCheck(items)
   })

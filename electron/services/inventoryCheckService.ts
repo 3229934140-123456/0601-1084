@@ -1,5 +1,5 @@
-import { query, queryOne, run, exec, beginTransaction, commitTransaction, rollbackTransaction } from '../database'
-import { getAssetById, updateAsset, getAllAssetsForCheck } from './assetService'
+import { query, queryOne, run, beginTransaction, commitTransaction, rollbackTransaction } from '../database'
+import { getAssetById, updateAsset } from './assetService'
 
 export interface InventoryCheckRecord {
   id?: number
@@ -22,10 +22,11 @@ export function getInventoryCheckList(params: {
   status?: string
   startDate?: string
   endDate?: string
+  check_no?: string
   page?: number
   pageSize?: number
 } = {}): { list: InventoryCheckRecord[]; total: number } {
-  const { keyword, status, startDate, endDate, page = 1, pageSize = 20 } = params
+  const { keyword, status, startDate, endDate, check_no, page = 1, pageSize = 200 } = params
 
   let where = 'WHERE 1=1'
   const paramsArr: any[] = []
@@ -46,6 +47,10 @@ export function getInventoryCheckList(params: {
     where += ' AND date(ic.check_date) <= date(?)'
     paramsArr.push(endDate)
   }
+  if (check_no) {
+    where += ' AND ic.check_no = ?'
+    paramsArr.push(check_no)
+  }
 
   const countSql = `SELECT COUNT(*) as total FROM inventory_check ic ${where}`
   const totalResult = queryOne(countSql, paramsArr)
@@ -56,7 +61,7 @@ export function getInventoryCheckList(params: {
     SELECT ic.*
     FROM inventory_check ic
     ${where}
-    ORDER BY ic.id DESC
+    ORDER BY ic.check_no DESC, ic.id ASC
     LIMIT ? OFFSET ?
   `
   const list = query(sql, [...paramsArr, pageSize, offset]) as InventoryCheckRecord[]
@@ -64,19 +69,53 @@ export function getInventoryCheckList(params: {
   return { list, total }
 }
 
+export function getCheckGroupList(params: {
+  keyword?: string
+  status?: string
+  page?: number
+  pageSize?: number
+} = {}): { list: { check_no: string; check_date: string; total_items: number; pending_count: number }[]; total: number } {
+  const { keyword, status, page = 1, pageSize = 50 } = params
+
+  let where = 'WHERE 1=1'
+  const paramsArr: any[] = []
+
+  if (keyword) {
+    where += ' AND check_no LIKE ?'
+    paramsArr.push(`%${keyword}%`)
+  }
+  if (status) {
+    where += ' AND status = ?'
+    paramsArr.push(status)
+  }
+
+  const sql = `
+    SELECT 
+      check_no,
+      check_date,
+      COUNT(*) as total_items,
+      SUM(CASE WHEN status = '待处理' THEN 1 ELSE 0 END) as pending_count
+    FROM inventory_check
+    ${where}
+    GROUP BY check_no, check_date
+    ORDER BY MIN(id) DESC
+  `
+  const list = query(sql, paramsArr) as { check_no: string; check_date: string; total_items: number; pending_count: number }[]
+  return { list, total: list.length }
+}
+
 export function createBatchCheck(items: {
   asset_id: number
   actual_qty: number
   handler?: string
   remark?: string
-}[]): number {
+}[]): string {
   const checkNo = generateCheckNo()
   const checkDate = new Date().toISOString().split('T')[0]
 
   try {
     beginTransaction()
 
-    let count = 0
     for (const item of items) {
       const asset = getAssetById(item.asset_id)
       if (!asset) continue
@@ -98,11 +137,10 @@ export function createBatchCheck(items: {
           item.remark || ''
         ]
       )
-      count++
     }
 
     commitTransaction()
-    return count
+    return checkNo
   } catch (e) {
     rollbackTransaction()
     throw e
@@ -119,12 +157,9 @@ export function handleCheckDiff(id: number, handleType: 'adjust' | 'ignore', rem
     }
 
     if (handleType === 'adjust' && check.asset_id) {
-      const asset = getAssetById(check.asset_id)
-      if (asset) {
-        updateAsset(check.asset_id, {
-          quantity: check.actual_qty
-        })
-      }
+      updateAsset(check.asset_id, {
+        quantity: check.actual_qty
+      })
     }
 
     run(
@@ -153,5 +188,3 @@ function generateCheckNo(): string {
   const random = String(Math.floor(Math.random() * 10000)).padStart(4, '0')
   return `PD${dateStr}${random}`
 }
-
-export { getAllAssetsForCheck }
