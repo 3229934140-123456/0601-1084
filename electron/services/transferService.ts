@@ -1,5 +1,5 @@
-import { query, queryOne, run, exec, beginTransaction, commitTransaction, rollbackTransaction } from '../database'
-import { getAssetById, updateAsset, createAsset } from './assetService'
+import { query, queryOne, run, beginTransaction, commitTransaction, rollbackTransaction } from '../database'
+import { getAssetById, updateAsset } from './assetService'
 
 export interface TransferRecord {
   id?: number
@@ -78,69 +78,91 @@ export function getTransferList(params: {
 }
 
 export function createTransfer(record: Omit<TransferRecord, 'id' | 'transfer_no' | 'created_at'>): number {
+  if (!record.asset_id) {
+    throw new Error('请选择调拨资产')
+  }
+  if (!record.from_warehouse_id || !record.to_warehouse_id) {
+    throw new Error('请选择源仓库和目标仓库')
+  }
+  if (!record.quantity || record.quantity <= 0) {
+    throw new Error('调拨数量必须大于0')
+  }
+
   const transferNo = generateTransferNo()
 
   try {
     beginTransaction()
 
-    const asset = getAssetById(record.asset_id!)
+    const asset = getAssetById(record.asset_id)
     if (!asset) {
       throw new Error('资产不存在')
     }
     if ((asset.quantity || 0) < record.quantity) {
-      throw new Error('库存不足')
+      throw new Error(`库存不足，当前库存${asset.quantity || 0}，调拨数量${record.quantity}`)
+    }
+    if (asset.warehouse_id !== record.from_warehouse_id) {
+      throw new Error('资产不在指定的源仓库中')
     }
 
-    if (asset.serial_number && record.quantity === 1) {
+    const transferQty = record.quantity
+    const assetSerial = asset.serial_number?.trim()
+    const assetQty = asset.quantity || 0
+
+    const isSingleSerialMove = assetSerial && assetQty === 1 && transferQty === 1
+
+    if (isSingleSerialMove) {
       updateAsset(record.asset_id!, {
         warehouse_id: record.to_warehouse_id,
         shelf: record.to_shelf || asset.shelf
       })
     } else {
-      if (asset.warehouse_id === record.from_warehouse_id) {
-        const newQty = (asset.quantity || 0) - record.quantity
-        if (newQty <= 0) {
-          run('DELETE FROM assets WHERE id = ?', [record.asset_id!])
-        } else {
-          updateAsset(record.asset_id!, {
-            quantity: newQty
-          })
-        }
+      const srcRemainQty = assetQty - transferQty
+      if (srcRemainQty <= 0) {
+        run('DELETE FROM assets WHERE id = ?', [record.asset_id!])
+      } else {
+        updateAsset(record.asset_id!, {
+          quantity: srcRemainQty
+        })
       }
 
+      const hasSerial = assetSerial && assetSerial.length > 0
       let targetAsset: any = null
-      if (record.serial_number) {
+
+      if (hasSerial) {
         targetAsset = queryOne(
           'SELECT * FROM assets WHERE serial_number = ? AND warehouse_id = ?',
-          [record.serial_number, record.to_warehouse_id]
+          [assetSerial, record.to_warehouse_id]
         )
       } else {
         targetAsset = queryOne(
-          'SELECT * FROM assets WHERE name = ? AND model = ? AND warehouse_id = ? AND (serial_number IS NULL OR serial_number = \'\')',
+          "SELECT * FROM assets WHERE name = ? AND COALESCE(model, '') = COALESCE(?, '') AND warehouse_id = ? AND (serial_number IS NULL OR serial_number = '')",
           [record.asset_name, record.model || '', record.to_warehouse_id]
         )
       }
 
       if (targetAsset) {
         updateAsset(targetAsset.id, {
-          quantity: (targetAsset.quantity || 0) + record.quantity,
+          quantity: (targetAsset.quantity || 0) + transferQty,
           shelf: record.to_shelf || targetAsset.shelf
         })
       } else {
         const insertSql = `
-          INSERT INTO assets (name, model, serial_number, category, warehouse_id, shelf, quantity, unit_price, supplier, safety_stock, status)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '正常')
+          INSERT INTO assets (name, model, serial_number, category, warehouse_id, shelf, quantity, unit_price, supplier, expire_date, safety_stock, photo_path, status, remark)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, '正常', ?)
         `
         run(insertSql, [
           record.asset_name,
           record.model || null,
-          record.serial_number || null,
+          hasSerial ? assetSerial : null,
           record.category || asset.category,
           record.to_warehouse_id,
           record.to_shelf || null,
-          record.quantity,
+          transferQty,
           asset.unit_price,
-          asset.supplier
+          asset.supplier,
+          asset.expire_date,
+          asset.photo_path,
+          asset.remark
         ])
       }
     }
@@ -154,9 +176,9 @@ export function createTransfer(record: Omit<TransferRecord, 'id' | 'transfer_no'
       record.asset_id,
       record.asset_name,
       record.model,
-      record.serial_number,
+      assetSerial || record.serial_number,
       record.category,
-      record.quantity,
+      transferQty,
       record.from_warehouse_id,
       record.from_shelf,
       record.to_warehouse_id,
@@ -168,7 +190,7 @@ export function createTransfer(record: Omit<TransferRecord, 'id' | 'transfer_no'
     commitTransaction()
     return result.lastInsertRowid
   } catch (e) {
-    rollbackTransaction()
+    try { rollbackTransaction() } catch (_) {}
     throw e
   }
 }

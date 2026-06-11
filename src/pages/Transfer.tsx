@@ -114,7 +114,8 @@ const Transfer: React.FC = () => {
       serial_number: asset.serial_number,
       category: asset.category,
       from_warehouse_id: asset.warehouse_id,
-      from_shelf: asset.shelf
+      from_shelf: asset.shelf,
+      quantity: 1
     })
   }
 

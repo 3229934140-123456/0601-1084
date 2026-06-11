@@ -199,10 +199,16 @@ const Inventory: React.FC = () => {
         handler: '管理员',
         remark: ''
       }))
-      const checkNo = await window.api.inventoryCheck.createBatch(items)
-      message.success(`盘点单 ${checkNo} 创建成功，共${items.length}项`)
+      const result = await window.api.inventoryCheck.createBatch(items)
+      const msg = `盘点单 ${result.check_no} 创建成功，共${result.success_count}项` + (result.fail_count > 0 ? `，${result.fail_count}项失败` : '')
+      message.success(msg)
       setCheckModalOpen(false)
-      loadCheckGroups()
+      await loadCheckGroups()
+      setTimeout(async () => {
+        const details = await window.api.inventoryCheck.getByNo(result.check_no)
+        setExpandedCheckNo(result.check_no)
+        setExpandedDetails(details)
+      }, 100)
     } catch (e: any) {
       message.error(e.message || '创建盘点单失败')
     }

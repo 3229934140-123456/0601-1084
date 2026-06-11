@@ -26,7 +26,7 @@ export function getInventoryCheckList(params: {
   page?: number
   pageSize?: number
 } = {}): { list: InventoryCheckRecord[]; total: number } {
-  const { keyword, status, startDate, endDate, check_no, page = 1, pageSize = 200 } = params
+  const { keyword, status, startDate, endDate, check_no, page = 1, pageSize = 10000 } = params
 
   let where = 'WHERE 1=1'
   const paramsArr: any[] = []
@@ -72,10 +72,8 @@ export function getInventoryCheckList(params: {
 export function getCheckGroupList(params: {
   keyword?: string
   status?: string
-  page?: number
-  pageSize?: number
 } = {}): { list: { check_no: string; check_date: string; total_items: number; pending_count: number }[]; total: number } {
-  const { keyword, status, page = 1, pageSize = 50 } = params
+  const { keyword, status } = params
 
   let where = 'WHERE 1=1'
   const paramsArr: any[] = []
@@ -84,9 +82,18 @@ export function getCheckGroupList(params: {
     where += ' AND check_no LIKE ?'
     paramsArr.push(`%${keyword}%`)
   }
+
+  const subWhere = where
+  let having = ''
+  const havingParams: any[] = []
   if (status) {
-    where += ' AND status = ?'
-    paramsArr.push(status)
+    if (status === '待处理') {
+      having = 'HAVING SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) > 0'
+      havingParams.push(status)
+    } else {
+      having = 'HAVING SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) = COUNT(*)'
+      havingParams.push(status)
+    }
   }
 
   const sql = `
@@ -96,12 +103,19 @@ export function getCheckGroupList(params: {
       COUNT(*) as total_items,
       SUM(CASE WHEN status = '待处理' THEN 1 ELSE 0 END) as pending_count
     FROM inventory_check
-    ${where}
+    ${subWhere}
     GROUP BY check_no, check_date
+    ${having}
     ORDER BY MIN(id) DESC
   `
-  const list = query(sql, paramsArr) as { check_no: string; check_date: string; total_items: number; pending_count: number }[]
+  const list = query(sql, [...paramsArr, ...havingParams]) as { check_no: string; check_date: string; total_items: number; pending_count: number }[]
   return { list, total: list.length }
+}
+
+export interface BatchCheckResult {
+  check_no: string
+  success_count: number
+  fail_count: number
 }
 
 export function createBatchCheck(items: {
@@ -109,40 +123,67 @@ export function createBatchCheck(items: {
   actual_qty: number
   handler?: string
   remark?: string
-}[]): string {
+}[]): BatchCheckResult {
+  if (!items || items.length === 0) {
+    throw new Error('没有可盘点的资产')
+  }
+
   const checkNo = generateCheckNo()
   const checkDate = new Date().toISOString().split('T')[0]
 
   try {
     beginTransaction()
 
-    for (const item of items) {
-      const asset = getAssetById(item.asset_id)
-      if (!asset) continue
+    let successCount = 0
+    let failCount = 0
 
-      const diff = item.actual_qty - (asset.quantity || 0)
-      run(
-        `INSERT INTO inventory_check (check_no, check_date, asset_id, asset_name, model, system_qty, actual_qty, diff_qty, handler, status, remark)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '待处理', ?)`,
-        [
-          checkNo,
-          checkDate,
-          item.asset_id,
-          asset.name,
-          asset.model || '',
-          asset.quantity || 0,
-          item.actual_qty,
-          diff,
-          item.handler || '',
-          item.remark || ''
-        ]
-      )
+    for (const item of items) {
+      try {
+        const asset = getAssetById(item.asset_id)
+        if (!asset) {
+          failCount++
+          continue
+        }
+
+        const systemQty = asset.quantity || 0
+        const actualQty = item.actual_qty ?? systemQty
+        const diff = actualQty - systemQty
+
+        run(
+          `INSERT INTO inventory_check (check_no, check_date, asset_id, asset_name, model, system_qty, actual_qty, diff_qty, handler, status, remark)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '待处理', ?)`,
+          [
+            checkNo,
+            checkDate,
+            item.asset_id,
+            asset.name,
+            asset.model || '',
+            systemQty,
+            actualQty,
+            diff,
+            item.handler || '',
+            item.remark || ''
+          ]
+        )
+        successCount++
+      } catch (itemErr) {
+        failCount++
+      }
+    }
+
+    if (successCount === 0) {
+      rollbackTransaction()
+      throw new Error('盘点单创建失败，没有可保存的资产明细')
     }
 
     commitTransaction()
-    return checkNo
+    return {
+      check_no: checkNo,
+      success_count: successCount,
+      fail_count: failCount
+    }
   } catch (e) {
-    rollbackTransaction()
+    try { rollbackTransaction() } catch (_) {}
     throw e
   }
 }
@@ -173,7 +214,7 @@ export function handleCheckDiff(id: number, handleType: 'adjust' | 'ignore', rem
 
     commitTransaction()
   } catch (e) {
-    rollbackTransaction()
+    try { rollbackTransaction() } catch (_) {}
     throw e
   }
 }

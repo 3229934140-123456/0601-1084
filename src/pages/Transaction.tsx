@@ -212,15 +212,33 @@ const Transaction: React.FC = () => {
       width: 80
     },
     {
-      title: '仓库/源仓库',
+      title: '仓库',
       dataIndex: 'warehouse',
-      width: 120
+      width: 110,
+      render: (val: string, record: TransactionRecord) => (
+        <div>
+          {record.type === 'in' && <Tag color="green">入库</Tag>}
+          {record.type === 'out' && <Tag color="red">出库</Tag>}
+          {record.type === 'transfer' && <Tag color="blue">源仓</Tag>}
+          <span style={{ marginLeft: 4 }}>{val || '-'}</span>
+        </div>
+      )
     },
     {
       title: '目标仓库',
       dataIndex: 'target_warehouse',
-      width: 120,
-      render: (val: string) => val || '-'
+      width: 110,
+      render: (val: string, record: TransactionRecord) => {
+        if (record.type === 'transfer') {
+          return (
+            <div>
+              <Tag color="blue" style={{ opacity: 0.8 }}>目标</Tag>
+              <span style={{ marginLeft: 4 }}>{val || '-'}</span>
+            </div>
+          )
+        }
+        return <span style={{ color: '#bfbfbf' }}>-</span>
+      }
     },
     {
       title: '经办人',
