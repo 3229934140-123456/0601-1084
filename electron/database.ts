@@ -154,7 +154,7 @@ function initTables() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
       model TEXT,
-      serial_number TEXT UNIQUE,
+      serial_number TEXT,
       category TEXT NOT NULL,
       warehouse_id INTEGER,
       shelf TEXT,
@@ -173,7 +173,7 @@ function initTables() {
 
     CREATE TABLE IF NOT EXISTS stock_in (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      order_no TEXT UNIQUE,
+      order_no TEXT,
       asset_id INTEGER,
       asset_name TEXT NOT NULL,
       model TEXT,
@@ -194,7 +194,7 @@ function initTables() {
 
     CREATE TABLE IF NOT EXISTS stock_out (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      order_no TEXT UNIQUE,
+      order_no TEXT,
       asset_id INTEGER,
       asset_name TEXT NOT NULL,
       model TEXT,
@@ -216,7 +216,7 @@ function initTables() {
 
     CREATE TABLE IF NOT EXISTS transfers (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      transfer_no TEXT UNIQUE,
+      transfer_no TEXT,
       asset_id INTEGER,
       asset_name TEXT NOT NULL,
       model TEXT,
@@ -237,7 +237,7 @@ function initTables() {
 
     CREATE TABLE IF NOT EXISTS inventory_check (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      check_no TEXT UNIQUE,
+      check_no TEXT,
       check_date TEXT,
       asset_id INTEGER,
       asset_name TEXT,
@@ -254,10 +254,191 @@ function initTables() {
 
     CREATE INDEX IF NOT EXISTS idx_assets_category ON assets(category);
     CREATE INDEX IF NOT EXISTS idx_assets_warehouse ON assets(warehouse_id);
+    CREATE INDEX IF NOT EXISTS idx_assets_serial ON assets(serial_number);
     CREATE INDEX IF NOT EXISTS idx_stock_in_date ON stock_in(created_at);
     CREATE INDEX IF NOT EXISTS idx_stock_out_date ON stock_out(created_at);
     CREATE INDEX IF NOT EXISTS idx_transfers_date ON transfers(created_at);
+    CREATE INDEX IF NOT EXISTS idx_inventory_check_no ON inventory_check(check_no);
   `)
+
+  migrateConstraints()
+}
+
+function migrateConstraints() {
+  try {
+    function getTableSql(table: string): string {
+      const row = queryOne("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", [table])
+      return row?.sql || ''
+    }
+
+    const assetsSql = getTableSql('assets')
+    const inventoryCheckSql = getTableSql('inventory_check')
+    const stockInSql = getTableSql('stock_in')
+    const stockOutSql = getTableSql('stock_out')
+    const transfersSql = getTableSql('transfers')
+
+    const needsRebuild =
+      /serial_number\s+[^,]*UNIQUE/i.test(assetsSql) ||
+      /check_no\s+[^,]*UNIQUE/i.test(inventoryCheckSql) ||
+      /order_no\s+[^,]*UNIQUE/i.test(stockInSql) ||
+      /order_no\s+[^,]*UNIQUE/i.test(stockOutSql) ||
+      /transfer_no\s+[^,]*UNIQUE/i.test(transfersSql)
+
+    if (!needsRebuild) {
+      saveDb()
+      return
+    }
+
+    console.log('检测到旧表有 UNIQUE 约束，正在自动重建数据库...')
+
+    function rebuildTable(table: string, createSql: string, insertCols: string) {
+      const oldData = query(`SELECT * FROM ${table}`)
+      db!.run(`DROP TABLE IF EXISTS ${table}_old`)
+      db!.run(`ALTER TABLE ${table} RENAME TO ${table}_old`)
+      db!.run(createSql)
+      if (oldData && oldData.length > 0) {
+        for (const row of oldData) {
+          const cols = insertCols.split(',').map(c => c.trim())
+          const placeholders = cols.map(() => '?').join(',')
+          const values = cols.map(c => row[c])
+          try {
+            db!.run(`INSERT INTO ${table} (${cols.join(',')}) VALUES (${placeholders})`, values)
+          } catch (insErr) {
+            console.warn(`迁移 ${table} 时跳过一条冲突数据:`, insErr)
+          }
+        }
+      }
+      db!.run(`DROP TABLE IF EXISTS ${table}_old`)
+    }
+
+    beginTransaction()
+
+    rebuildTable('assets', `
+      CREATE TABLE assets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        model TEXT,
+        serial_number TEXT,
+        category TEXT NOT NULL,
+        warehouse_id INTEGER,
+        shelf TEXT,
+        quantity INTEGER DEFAULT 0,
+        unit_price REAL DEFAULT 0,
+        supplier TEXT,
+        expire_date TEXT,
+        safety_stock INTEGER DEFAULT 0,
+        photo_path TEXT,
+        status TEXT DEFAULT '正常',
+        remark TEXT,
+        created_at TEXT DEFAULT (datetime('now', 'localtime')),
+        updated_at TEXT DEFAULT (datetime('now', 'localtime')),
+        FOREIGN KEY (warehouse_id) REFERENCES warehouses(id)
+      )
+    `, 'id,name,model,serial_number,category,warehouse_id,shelf,quantity,unit_price,supplier,expire_date,safety_stock,photo_path,status,remark,created_at,updated_at')
+
+    rebuildTable('inventory_check', `
+      CREATE TABLE inventory_check (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        check_no TEXT,
+        check_date TEXT,
+        asset_id INTEGER,
+        asset_name TEXT,
+        model TEXT,
+        system_qty INTEGER,
+        actual_qty INTEGER,
+        diff_qty INTEGER,
+        handler TEXT,
+        status TEXT DEFAULT '待处理',
+        remark TEXT,
+        created_at TEXT DEFAULT (datetime('now', 'localtime')),
+        FOREIGN KEY (asset_id) REFERENCES assets(id)
+      )
+    `, 'id,check_no,check_date,asset_id,asset_name,model,system_qty,actual_qty,diff_qty,handler,status,remark,created_at')
+
+    rebuildTable('stock_in', `
+      CREATE TABLE stock_in (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_no TEXT,
+        asset_id INTEGER,
+        asset_name TEXT NOT NULL,
+        model TEXT,
+        serial_number TEXT,
+        category TEXT,
+        quantity INTEGER NOT NULL,
+        unit_price REAL,
+        supplier TEXT,
+        warehouse_id INTEGER,
+        shelf TEXT,
+        operator TEXT,
+        photo_path TEXT,
+        remark TEXT,
+        created_at TEXT DEFAULT (datetime('now', 'localtime')),
+        FOREIGN KEY (asset_id) REFERENCES assets(id),
+        FOREIGN KEY (warehouse_id) REFERENCES warehouses(id)
+      )
+    `, 'id,order_no,asset_id,asset_name,model,serial_number,category,quantity,unit_price,supplier,warehouse_id,shelf,operator,photo_path,remark,created_at')
+
+    rebuildTable('stock_out', `
+      CREATE TABLE stock_out (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_no TEXT,
+        asset_id INTEGER,
+        asset_name TEXT NOT NULL,
+        model TEXT,
+        serial_number TEXT,
+        category TEXT,
+        quantity INTEGER NOT NULL,
+        applicant TEXT,
+        department_id INTEGER,
+        purpose TEXT,
+        cost_center TEXT,
+        warehouse_id INTEGER,
+        operator TEXT,
+        remark TEXT,
+        created_at TEXT DEFAULT (datetime('now', 'localtime')),
+        FOREIGN KEY (asset_id) REFERENCES assets(id),
+        FOREIGN KEY (department_id) REFERENCES departments(id),
+        FOREIGN KEY (warehouse_id) REFERENCES warehouses(id)
+      )
+    `, 'id,order_no,asset_id,asset_name,model,serial_number,category,quantity,applicant,department_id,purpose,cost_center,warehouse_id,operator,remark,created_at')
+
+    rebuildTable('transfers', `
+      CREATE TABLE transfers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        transfer_no TEXT,
+        asset_id INTEGER,
+        asset_name TEXT NOT NULL,
+        model TEXT,
+        serial_number TEXT,
+        category TEXT,
+        quantity INTEGER NOT NULL,
+        from_warehouse_id INTEGER,
+        from_shelf TEXT,
+        to_warehouse_id INTEGER,
+        to_shelf TEXT,
+        operator TEXT,
+        remark TEXT,
+        created_at TEXT DEFAULT (datetime('now', 'localtime')),
+        FOREIGN KEY (asset_id) REFERENCES assets(id),
+        FOREIGN KEY (from_warehouse_id) REFERENCES warehouses(id),
+        FOREIGN KEY (to_warehouse_id) REFERENCES warehouses(id)
+      )
+    `, 'id,transfer_no,asset_id,asset_name,model,serial_number,category,quantity,from_warehouse_id,from_shelf,to_warehouse_id,to_shelf,operator,remark,created_at')
+
+    db!.run(`CREATE INDEX IF NOT EXISTS idx_assets_category ON assets(category)`)
+    db!.run(`CREATE INDEX IF NOT EXISTS idx_assets_warehouse ON assets(warehouse_id)`)
+    db!.run(`CREATE INDEX IF NOT EXISTS idx_assets_serial ON assets(serial_number)`)
+    db!.run(`CREATE INDEX IF NOT EXISTS idx_stock_in_date ON stock_in(created_at)`)
+    db!.run(`CREATE INDEX IF NOT EXISTS idx_stock_out_date ON stock_out(created_at)`)
+    db!.run(`CREATE INDEX IF NOT EXISTS idx_transfers_date ON transfers(created_at)`)
+    db!.run(`CREATE INDEX IF NOT EXISTS idx_inventory_check_no ON inventory_check(check_no)`)
+
+    commitTransaction()
+    console.log('数据库重建完成。')
+  } catch (e) {
+    try { rollbackTransaction() } catch (_) {}
+    console.warn('迁移约束时出错（可能首次建表，可忽略）：', e)
+  }
 }
 
 function initSeedData() {

@@ -54,6 +54,7 @@ export interface StockOutRecord {
   purpose?: string
   cost_center?: string
   warehouse_id?: number
+  warehouse_name?: string
   operator?: string
   remark?: string
   created_at?: string
