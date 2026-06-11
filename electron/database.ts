@@ -10,9 +10,17 @@ let inTransaction = false
 export async function initDb(): Promise<void> {
   if (db) return
 
+  const projectRoot = app.isPackaged
+    ? path.dirname(app.getAppPath())
+    : process.cwd()
+  const wasmPath = path.join(projectRoot, 'node_modules', 'sql.js', 'dist')
   SQL = await initSqlJs({
     locateFile: (file: string) => {
-      return path.join(__dirname, '..', 'node_modules', 'sql.js', 'dist', file)
+      const fullPath = path.join(wasmPath, file)
+      if (fs.existsSync(fullPath)) {
+        return fullPath
+      }
+      return `https://sql.js.org/dist/${file}`
     }
   })
 
